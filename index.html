@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0a12">
+<title>Рыцарь против Дракона</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100%; height: 100%; height: 100dvh;
+    overflow: hidden;
+    background: #000;
+    font-family: 'Courier New', monospace;
+    user-select: none; -webkit-user-select: none;
+    touch-action: none;
+    position: fixed;
+    top: 0; left: 0;
+  }
+  #game {
+    position: fixed;
+    inset: 0;
+    width: 100vw; height: 100vh; height: 100dvh;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: crisp-edges;
+    touch-action: none;
+    background: #000;
+  }
+  #rotate {
+    position: fixed; inset: 0; background: #0a0a12; color: #ffd700;
+    display: none; align-items: center; justify-content: center;
+    flex-direction: column; z-index: 999; text-align: center; padding: 20px;
+  }
+  #rotate .icon { font-size: 60px; margin-bottom: 20px; animation: rot 2s infinite; }
+  @keyframes rot { 0%,100%{transform:rotate(0)} 50%{transform:rotate(90deg)} }
+  @media (orientation: portrait) and (max-width: 700px) {
+    #rotate { display: flex; }
+  }
+</style>
+</head>
+<body>
+<div id="rotate">
+  <div class="icon">📱</div>
+  <h2>Поверни телефон горизонтально</h2>
+  <p style="margin-top:10px;opacity:0.7">Игра рассчитана на альбомную ориентацию</p>
+</div>
+<div id="game"><canvas id="cv"></canvas></div>
+
+<script>
+/* ============================================================
+   РЫЦАРЬ ПРОТИВ ДРАКОНА — 2D пиксельная игра
+   Исправленная версия: fullscreen, правильный scale
+   ============================================================ */
+
+const CV = document.getElementById('cv');
+const CTX = CV.getContext('2d', { alpha: false });
+const W = 480, H = 270;           // Внутреннее разрешение (16:9)
+let scale = 1, offsetX = 0, offsetY = 0;
+let canvasW = 0, canvasH = 0;
+
+function resize() {
+  const gw = document.getElementById('game');
+  const w = gw.clientWidth;
+  const h = gw.clientHeight;
+
+  // Масштаб = минимум из соотношений, чтобы всё влезло
+  scale = Math.min(w / W, h / H);
+
+  canvasW = Math.floor(W * scale);
+  canvasH = Math.floor(H * scale);
+  offsetX = Math.floor((w - canvasW) / 2);
+  offsetY = Math.floor((h - canvasH) / 2);
+
+  CV.width = W;
+  CV.height = H;
+  CV.style.width = canvasW + 'px';
+  CV.style.height = canvasH + 'px';
+  CV.style.position = 'absolute';
+  CV.style.left = offsetX + 'px';
+  CV.style.top = offsetY + 'px';
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+resize();
+
+/* Полноэкранный режим при первом тапе */
+let fullscreenTried = false;
+function tryFullscreen() {
+  if (fullscreenTried) return;
+  fullscreenTried = true;
+  const el = document.documentElement;
+  if (el.requestFullscreen) el.requestFullscreen().catch(()=>{});
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  if (screen.orientation && screen.orientation.lock) {
+    screen.orientation.lock('landscape').catch(()=>{});
+  }
+  setTimeout(resize, 300);
+}
+
+/* ==================== ЗВУК (Web Audio) ==================== */
+const Audio = {
+  ctx: null, musicGain: null, sfxGain: null, musicTimer: null, musicOn: true,
+  init() {
+    if (this.ctx) return;
+    try {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.musicGain = this.ctx.createGain();
+      this.sfxGain = this.ctx.createGain();
+      this.musicGain.gain.value = 0.12;
+      this.sfxGain.gain.value = 0.20;
+      this.musicGain.connect(this.ctx.destination);
+      this.sfxGain.connect(this.ctx.destination);
+    } catch(e) {}
+  },
+  beep(freq, dur, type='square', vol=1, slideTo=null) {
+    if (!this.ctx) return;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, this.ctx.currentTime);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, this.ctx.currentTime + dur);
+    g.gain.setValueAtTime(vol * 0.3, this.ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + dur);
+    o.connect(g); g.connect(this.sfxGain);
+    o.start(); o.stop(this.ctx.currentTime + dur);
+  },
+  noise(dur, vol=0.3) {
+    if (!this.ctx) return;
+    const buf = this.ctx.createBuffer(1, Math.floor(this.ctx.sampleRate * dur), this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const s = this.ctx.createBufferSource();
+    s.buffer = buf;
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(vol, this.ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + dur);
+    s.connect(g); g.connect(this.sfxGain);
+    s.start();
+  },
+  hit() { this.beep(180, 0.1, 'square', 1, 60); this.noise(0.08, 0.2); },
+  crit() { this.beep(300, 0.15, 'sawtooth', 1, 100); this.noise(0.15, 0.35); },
+  hurt() { this.beep(120, 0.2, 'sawtooth', 1, 40); },
+  coin() { this.beep(880, 0.06, 'square', 0.7); setTimeout(()=>this.beep(1320, 0.1, 'square', 0.7), 60); },
+  potion() { this.beep(500, 0.1, 'sine', 0.8, 900); },
+  levelup() { [523,659,784,1047].forEach((f,i)=>setTimeout(()=>this.beep(f,0.15,'square',0.7),i*90)); },
+  roar() { this.beep(80, 0.5, 'sawtooth', 1, 40); this.noise(0.5, 0.4); },
+  death() { [400,300,200,100].forEach((f,i)=>setTimeout(()=>this.beep(f,0.2,'square',0.8),i*150)); },
+  victory() { [523,659,784,1047,1319].forEach((f,i)=>setTimeout(()=>this.beep(f,0.2,'square',0.8),i*130)); },
+  startMusic(track='forest') {
+    this.stopMusic();
+    if (!this.ctx || !this.musicOn) return;
+    const scales = {
+      forest: [220,247,262,294,330,294,262,247],
+      battle: [330,392,440,392,330,294,262,294],
+      castle: [262,294,330,349,392,349,330,294],
+      menu:   [262,330,392,330,294,349,440,349],
+    };
+    const notes = scales[track] || scales.menu;
+    let i = 0;
+    const play = () => {
+      if (!this.musicOn || !this.ctx) return;
+      const o = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      o.type = 'triangle';
+      o.frequency.value = notes[i % notes.length];
+      g.gain.setValueAtTime(0.001, this.ctx.currentTime);
+      g.gain.linearRampToValueAtTime(0.5, this.ctx.currentTime + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.6);
+      o.connect(g); g.connect(this.musicGain);
+      o.start(); o.stop(this.ctx.currentTime + 0.7);
+      i++;
+      this.musicTimer = setTimeout(play, 650);
+    };
+    play();
+  },
+  stopMusic() { if (this.musicTimer) { clearTimeout(this.musicTimer); this.musicTimer = null; } },
+  toggleMusic() {
+    this.musicOn = !this.musicOn;
+    if (!this.musicOn) this.stopMusic();
+    else this.startMusic('menu');
+  }
+};
+
+/* ==================== СПРАЙТЫ ==================== */
+function drawSprite(sprite, x, y, scale=1, flip=false, palette=null) {
+  const colors = palette || {
+    '1': '#ffffff', '2': '#ffd700', '3': '#000000',
+    '4': '#888888', '5': '#cc3333', '6': '#33aa33', '7': '#3355cc'
+  };
+  const s = Math.floor(scale);
+  for (let row = 0; row < sprite.length; row++) {
+    const line = sprite[row];
+    for (let col = 0; col < line.length; col++) {
+      const ch = line[col];
+      if (ch === '0' || ch === ' ') continue;
+      const c = colors[ch];
+      if (!c) continue;
+      CTX.fillStyle = c;
+      const px = flip ? x + (line.length - 1 - col) * s : x + col * s;
+      CTX.fillRect(px, y + row * s, s, s);
+    }
+  }
+}
+
+const SPR_KNIGHT = [
+  "000033300000","000311130000","003122213000","031111111300",
+  "031222111300","031111111300","003111113000","003155513000",
+  "003177713000","003111113000","003133313000","003333333000",
+];
+const PAL_KNIGHT = { '1': '#8fa4c4', '2': '#e8e8f0', '3': '#1a1a2e', '5': '#c03a3a', '7': '#5a78b8' };
+
+const SPR_WOLF = [
+  "000000000000","003300330000","031111113000","031555113000",
+  "031111113000","031111113300","031111111300","003111113000",
+  "003131313000","003030303000","000000000000","000000000000",
+];
+const PAL_WOLF = { '1': '#5a5a6a', '3': '#0a0a12', '5': '#cc2222' };
+
+const SPR_GOBLIN = [
+  "000000000000","000333000000","003666300000","036116630000",
+  "036116630000","003666300000","003166130000","003666300000",
+  "003666300000","003363300000","000333000000","000000000000",
+];
+const PAL_GOBLIN = { '1': '#ff2222', '3': '#0a0a12', '6': '#5a8a3a' };
+
+const SPR_DRAGON = [
+  "0000000000000000","0300000000000030","0110000000000110","0111000000001110",
+  "0111100000011110","0115550000555110","0111555555511110","0011155555111100",
+  "0011115551111100","0011111111111100","0011111111111100","0001111111111000",
+  "0001311111310000","0001301111310000","0003300003300000","0000000000000000",
+];
+const PAL_DRAGON = { '1': '#cc2222', '3': '#0a0a12', '5': '#ffdd33' };
+
+function drawCastle(x, y, s=2) {
+  CTX.fillStyle = '#3a3a5a';
+  CTX.fillRect(x, y + 4*s, 20*s, 16*s);
+  for (let i = 0; i < 4; i++) CTX.fillRect(x + i*5*s, y, 3*s, 4*s);
+  CTX.fillStyle = '#1a1a2e';
+  CTX.fillRect(x + 7*s, y + 12*s, 6*s, 8*s);
+  CTX.fillStyle = '#ffdd66';
+  CTX.fillRect(x + 3*s, y + 8*s, 2*s, 2*s);
+  CTX.fillRect(x + 15*s, y + 8*s, 2*s, 2*s);
+}
+
+function drawForestBG(t) {
+  CTX.fillStyle = '#1a2a1a';
+  CTX.fillRect(0, 0, W, H);
+  const g = CTX.createLinearGradient(0, 0, 0, H*0.5);
+  g.addColorStop(0, '#2a1a3a');
+  g.addColorStop(1, '#3a2a4a');
+  CTX.fillStyle = g;
+  CTX.fillRect(0, 0, W, H*0.5);
+  CTX.fillStyle = '#ffffcc';
+  CTX.beginPath();
+  CTX.arc(W - 60, 40, 12, 0, Math.PI*2);
+  CTX.fill();
+  for (let i = 0; i < 8; i++) {
+    const tx = (i * 70 + (t*0.01)) % (W+80) - 40;
+    const th = 40 + (i % 3) * 15;
+    CTX.fillStyle = '#1a1a12';
+    CTX.fillRect(tx, H - 40 - th, 6, th);
+    CTX.fillStyle = '#1a3a1a';
+    CTX.fillRect(tx - 12, H - 40 - th, 30, 20);
+    CTX.fillRect(tx - 8, H - 40 - th - 12, 22, 15);
+  }
+  CTX.fillStyle = '#2a3a1a';
+  CTX.fillRect(0, H - 40, W, 40);
+  CTX.fillStyle = '#1a2a12';
+  for (let i = 0; i < 30; i++) {
+    const gx = (i * 17) % W;
+    CTX.fillRect(gx, H - 40 + (i%3)*8, 2, 3);
+  }
+}
+
+function drawCastleBG(t) {
+  CTX.fillStyle = '#1a1a2e';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#2a2a4a';
+  for (let i = 0; i < 20; i++) CTX.fillRect(i*25, 0, 2, H);
+  drawCastle(W - 100, 60, 3);
+  drawCastle(W - 160, 80, 2);
+  for (let i = 0; i < 3; i++) {
+    const fx = 60 + i*120;
+    const fl = Math.sin(t*0.01 + i)*2;
+    CTX.fillStyle = '#ffaa33';
+    CTX.fillRect(fx, 60 + fl, 4, 6);
+    CTX.fillStyle = '#ff5522';
+    CTX.fillRect(fx+1, 58 + fl, 2, 3);
+  }
+  CTX.fillStyle = '#2a1a1a';
+  CTX.fillRect(0, H - 40, W, 40);
+}
+
+function drawLairBG(t) {
+  const g = CTX.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1a0a0a');
+  g.addColorStop(1, '#3a1a0a');
+  CTX.fillStyle = g;
+  CTX.fillRect(0, 0, W, H);
+  for (let i = 0; i < 5; i++) {
+    const lx = i * 100 + Math.sin(t*0.005 + i)*10;
+    CTX.fillStyle = '#ff4400';
+    CTX.fillRect(lx, H - 30 + Math.sin(t*0.01 + i)*2, 30, 30);
+    CTX.fillStyle = '#ffaa00';
+    CTX.fillRect(lx + 5, H - 25, 20, 25);
+  }
+  CTX.fillStyle = '#aaa';
+  for (let i = 0; i < 6; i++) {
+    CTX.fillRect(40 + i*70, H - 45, 3, 3);
+    CTX.fillRect(43 + i*70, H - 45, 3, 3);
+  }
+}
+
+/* ==================== ЧАСТИЦЫ ==================== */
+const particles = [];
+function spawnParticles(x, y, color, count=8, speed=2) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y, vx: (Math.random()-0.5)*speed*2, vy: (Math.random()-0.5)*speed*2 - 1,
+      life: 30, maxLife: 30, color, size: 1 + Math.random()*2
+    });
+  }
+}
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.1;
+    p.life--;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles() {
+  for (const p of particles) {
+    CTX.globalAlpha = p.life / p.maxLife;
+    CTX.fillStyle = p.color;
+    CTX.fillRect(Math.floor(p.x), Math.floor(p.y), p.size, p.size);
+  }
+  CTX.globalAlpha = 1;
+}
+
+/* ==================== ТРЯСКА / ВСПЫШКИ ==================== */
+let shakeTime = 0, shakeIntensity = 0;
+function shake(i, t) { shakeIntensity = i; shakeTime = t; }
+function applyShake() {
+  if (shakeTime > 0) {
+    CTX.translate((Math.random()-0.5)*shakeIntensity, (Math.random()-0.5)*shakeIntensity);
+    shakeTime--; shakeIntensity *= 0.9;
+  }
+}
+let flashColor = null, flashTime = 0;
+function flash(color, time=10) { flashColor = color; flashTime = time; }
+function drawFlash() {
+  if (flashTime > 0 && flashColor) {
+    CTX.globalAlpha = flashTime / 10 * 0.5;
+    CTX.fillStyle = flashColor;
+    CTX.fillRect(0, 0, W, H);
+    CTX.globalAlpha = 1;
+    flashTime--;
+  }
+}
+
+/* ==================== ДАННЫЕ ==================== */
+const WEAPONS = {
+  "Ржавый меч":         { dmg: [3, 7],   crit: 0.05, price: 0,    color: '#aa8855' },
+  "Стальной меч":       { dmg: [7, 13],  crit: 0.08, price: 100,  color: '#cccccc' },
+  "Боевой топор":       { dmg: [10, 18], crit: 0.12, price: 250,  color: '#888888' },
+  "Копьё рыцаря":       { dmg: [9, 15],  crit: 0.20, price: 300,  color: '#dddddd' },
+  "Пламенный клинок":   { dmg: [15, 25], crit: 0.15, price: 600,  color: '#ff6622' },
+  "Клинок Драконоборца":{ dmg: [22, 35], crit: 0.25, price: 1200, color: '#ffdd33' },
+};
+
+const ENEMIES = {
+  "Лесной волк":      { hp: 25, dmg: [4, 8],   gold: [15, 30],  exp: 20,  loc: 'forest', sprite: SPR_WOLF,    pal: PAL_WOLF,   size: 2 },
+  "Гоблин":           { hp: 35, dmg: [5, 10],  gold: [20, 40],  exp: 30,  loc: 'forest', sprite: SPR_GOBLIN,  pal: PAL_GOBLIN, size: 2 },
+  "Разбойник":        { hp: 45, dmg: [7, 13],  gold: [30, 55],  exp: 45,  loc: 'forest', sprite: SPR_GOBLIN,  pal: { '1':'#ff2222','3':'#0a0a12','6':'#8a4a2a'}, size: 2 },
+  "Лесной тролль":    { hp: 70, dmg: [10, 18], gold: [50, 90],  exp: 70,  loc: 'forest', sprite: SPR_GOBLIN,  pal: { '1':'#ffaa22','3':'#0a0a12','6':'#4a6a2a'}, size: 3 },
+  "Стражник замка":   { hp: 55, dmg: [9, 15],  gold: [40, 70],  exp: 55,  loc: 'castle', sprite: SPR_KNIGHT,  pal: { '1':'#aa2222','2':'#ffcc00','3':'#0a0a12','5':'#333333','7':'#666666'}, size: 2 },
+  "Проклятый рыцарь": { hp: 85, dmg: [12, 20], gold: [70, 120], exp: 90,  loc: 'castle', sprite: SPR_KNIGHT,  pal: { '1':'#4a2a6a','2':'#aaffaa','3':'#0a0a12','5':'#222222','7':'#333333'}, size: 2 },
+  "Дракон":           { hp: 250, dmg:[18, 30], gold: [500, 1000],exp: 500, loc: 'lair',   sprite: SPR_DRAGON,  pal: PAL_DRAGON, size: 3, boss: true },
+};
+
+const ACHIEVEMENTS = {
+  first_blood: "🩸 Первая кровь", wolf_hunter: "🐺 Охотник на волков",
+  goblin_slayer: "👺 Гроза гоблинов", rich: "💰 Богач",
+  armored: "🛡️ Воин в броне", berserker: "🪓 Берсерк",
+  flame_master: "🔥 Владыка пламени", dragonslayer: "🐉 Драконоборец",
+  level_5: "⭐ Ветеран", level_10: "🌟 Легенда",
+  castle_visit: "🏰 Гость замка", forest_walker: "🌲 Лесной странник",
+  no_potion: "💪 Бесстрашный", collector: "🎁 Коллекционер",
+  survivor: "❤️ Живучий",
+};
+
+const CLASSES = {
+  paladin: { name: "Паладин", hp: 120, atk: 0, def: 3, color: '#8fa4c4' },
+  berserk: { name: "Берсерк", hp: 90,  atk: 4, def: 0, color: '#c03a3a' },
+  guard:   { name: "Страж",   hp: 150, atk: -2, def: 5, color: '#5a78b8' },
+};
+
+/* ==================== СОСТОЯНИЕ ==================== */
+const G = {
+  scene: 'menu', prevScene: 'world',
+  player: null, achievements: {},
+  stats: { wolves: 0, goblins: 0, forest_kills: 0, castle_visited: false },
+  weaponsOwned: new Set(['Ржавый меч']),
+  battle: null, toast: null, toastTimer: 0,
+  enemies: [], frame: 0, t: 0,
+};
+
+function showToast(text, color='#ffd700') { G.toast = { text, color }; G.toastTimer = 90; }
+
+function unlock(key) {
+  if (ACHIEVEMENTS[key] && !G.achievements[key]) {
+    G.achievements[key] = true;
+    showToast("🏆 " + ACHIEVEMENTS[key], '#ffd700');
+    Audio.levelup();
+  }
+}
+function loadGame() {
+  try {
+    const s = localStorage.getItem('knight_save');
+    if (!s) return false;
+    const d = JSON.parse(s);
+    G.player = d.player;
+    G.achievements = d.achievements || {};
+    G.stats = d.stats || { wolves:0, goblins:0, forest_kills:0, castle_visited:false };
+    G.weaponsOwned = new Set(d.weaponsOwned || ['Ржавый меч']);
+    return true;
+  } catch(e) { return false; }
+}
+function saveGame() {
+  if (!G.player) return;
+  localStorage.setItem('knight_save', JSON.stringify({
+    player: G.player, achievements: G.achievements,
+    stats: G.stats, weaponsOwned: [...G.weaponsOwned]
+  }));
+  showToast("💾 Сохранено", '#88ff88');
+}
+function hasSave() { return !!localStorage.getItem('knight_save'); }
+
+/* ==================== ВВОД ==================== */
+const touches = [];
+function toGameCoords(clientX, clientY) {
+  const r = CV.getBoundingClientRect();
+  return {
+    x: (clientX - r.left) / r.width * W,
+    y: (clientY - r.top) / r.height * H
+  };
+}
+let btnPressX = -1, btnPressY = -1;
+function onDown(x, y) {
+  tryFullscreen();
+  Audio.init();
+  if (Audio.ctx && Audio.ctx.state === 'suspended') Audio.ctx.resume();
+  const p = toGameCoords(x, y);
+  btnPressX = p.x; btnPressY = p.y;
+  handleTap(p.x, p.y);
+}
+CV.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) onDown(t.clientX, t.clientY);
+}, { passive: false });
+CV.addEventListener('mousedown', e => { e.preventDefault(); onDown(e.clientX, e.clientY); });
+CV.addEventListener('touchmove', e => e.preventDefault(), { passive: false });
+CV.addEventListener('touchend', e => e.preventDefault(), { passive: false });
+CV.addEventListener('contextmenu', e => e.preventDefault());
+
+let buttons = [];
+function btn(x, y, w, h, label, action, color='#3a3a5a', textColor='#ffffff') {
+  buttons.push({ x, y, w, h, label, action, color, textColor });
+}
+function handleTap(mx, my) {
+  for (let i = buttons.length - 1; i >= 0; i--) {
+    const b = buttons[i];
+    if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) {
+      b.action();
+      return;
+    }
+  }
+}
+function drawButton(b) {
+  const pressed = (btnPressX >= b.x && btnPressX <= b.x+b.w && btnPressY >= b.y && btnPressY <= b.y+b.h);
+  CTX.fillStyle = pressed ? '#ffffff' : b.color;
+  CTX.globalAlpha = pressed ? 0.6 : 1;
+  CTX.fillRect(b.x, b.y, b.w, b.h);
+  CTX.globalAlpha = 1;
+  CTX.strokeStyle = '#000';
+  CTX.lineWidth = 2;
+  CTX.strokeRect(b.x, b.y, b.w, b.h);
+  CTX.fillStyle = pressed ? '#000' : b.textColor;
+  CTX.font = 'bold 12px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  CTX.fillText(b.label, b.x + b.w/2, b.y + b.h/2);
+}
+
+/* ==================== ЛОГИКА ==================== */
+function createPlayer(classKey, name) {
+  const c = CLASSES[classKey];
+  G.player = {
+    name: name || 'Рыцарь', class: c.name, classKey,
+    level: 1, exp: 0, expNext: 100,
+    hp: c.hp, maxHp: c.hp, atk: c.atk, def: c.def,
+    gold: 50, weapon: 'Ржавый меч', potions: 2,
+  };
+}
+function checkLevelUp() {
+  let leveled = false;
+  while (G.player.exp >= G.player.expNext) {
+    G.player.exp -= G.player.expNext;
+    G.player.level++;
+    G.player.expNext = Math.floor(G.player.expNext * 1.5);
+    G.player.maxHp += 20;
+    G.player.hp = G.player.maxHp;
+    G.player.atk++;
+    leveled = true;
+    if (G.player.level >= 5) unlock('level_5');
+    if (G.player.level >= 10) unlock('level_10');
+  }
+  if (leveled) Audio.levelup();
+}
+function startBattle(enemyName) {
+  const e = ENEMIES[enemyName];
+  G.battle = {
+    name: enemyName, hp: e.hp, maxHp: e.hp,
+    dmg: e.dmg, gold: e.gold, exp: e.exp,
+    sprite: e.sprite, pal: e.pal, size: e.size, boss: !!e.boss,
+    enemyShake: 0, playerShake: 0, enemyFlash: 0, playerFlash: 0,
+    enemyAttackTimer: 0, playerAttackAnim: 0, enemyAttackAnim: 0,
+    log: [], potionsUsed: 0, turn: 0,
+  };
+  G.scene = 'battle';
+  Audio.startMusic(e.boss ? 'battle' : 'forest');
+  if (e.boss) { Audio.roar(); shake(8, 30); flash('#ff4400', 15); }
+  else { Audio.beep(220, 0.2, 'square', 0.5); }
+}
+function playerAttack() {
+  const b = G.battle; if (!b || b.turn !== 0) return;
+  const w = WEAPONS[G.player.weapon];
+  let dmg = Math.floor(Math.random() * (w.dmg[1] - w.dmg[0] + 1)) + w.dmg[0] + G.player.atk;
+  const crit = Math.random() < w.crit;
+  if (crit) dmg *= 2;
+  b.hp -= dmg;
+  b.enemyShake = 10; b.enemyFlash = 8; b.playerAttackAnim = 15;
+  b.log.push({ text: (crit ? '💥 КРИТ! ' : '🗡️ ') + dmg + ' урона', color: crit ? '#ffdd33' : '#ffffff', life: 60 });
+  spawnParticles(W/2 + 40, H/2 - 20, crit ? '#ffdd33' : '#ffffff', crit ? 16 : 8, crit ? 3 : 2);
+  if (crit) { Audio.crit(); shake(6, 12); flash('#ffdd33', 6); }
+  else { Audio.hit(); shake(3, 8); }
+  if (b.hp <= 0) { endBattle(true); return; }
+  b.turn = 1;
+  setTimeout(enemyAttack, 600);
+}
+function enemyAttack() {
+  const b = G.battle; if (!b || b.hp <= 0 || G.scene !== 'battle') return;
+  let dmg = Math.floor(Math.random() * (b.dmg[1] - b.dmg[0] + 1)) + b.dmg[0] - G.player.def;
+  dmg = Math.max(1, dmg);
+  G.player.hp -= dmg;
+  b.playerShake = 10; b.playerFlash = 8; b.enemyAttackAnim = 15;
+  b.log.push({ text: '👹 -' + dmg + ' HP', color: '#ff6666', life: 60 });
+  spawnParticles(W/2 - 60, H/2 - 20, '#ff4444', 8, 2);
+  Audio.hurt(); shake(4, 10);
+  if (G.player.hp <= 0) { endBattle(false); return; }
+  if (G.player.hp > 0 && G.player.hp < 5) unlock('survivor');
+  b.turn = 0;
+}
+function usePotion() {
+  const b = G.battle; if (!b || b.turn !== 0) return;
+  if (G.player.potions <= 0) { showToast("❌ Нет зелий", '#ff6666'); return; }
+  G.player.potions--; b.potionsUsed++;
+  G.player.hp = Math.min(G.player.maxHp, G.player.hp + 40);
+  b.log.push({ text: '🧪 +40 HP', color: '#88ff88', life: 60 });
+  Audio.potion();
+  spawnParticles(W/2 - 60, H/2 - 20, '#88ff88', 12, 2);
+  b.turn = 1;
+  setTimeout(enemyAttack, 600);
+}
+function endBattle(win) {
+  const b = G.battle;
+  if (!win) {
+    G.scene = 'gameover';
+    Audio.death(); Audio.stopMusic();
+    flash('#ff0000', 20); shake(10, 30);
+    return;
+  }
+  const gold = Math.floor(Math.random() * (b.gold[1] - b.gold[0] + 1)) + b.gold[0];
+  G.player.gold += gold;
+  G.player.exp += b.exp;
+  spawnParticles(W/2 + 40, H/2 - 20, '#ffd700', 20, 3);
+  Audio.coin();
+  showToast("✅ +" + gold + "💰 +" + b.exp + "✨", '#88ff88');
+  unlock('first_blood');
+  if (b.name === 'Лесной волк') { G.stats.wolves++; if (G.stats.wolves >= 5) unlock('wolf_hunter'); }
+  if (b.name === 'Гоблин') { G.stats.goblins++; if (G.stats.goblins >= 5) unlock('goblin_slayer'); }
+  if (ENEMIES[b.name].loc === 'forest') { G.stats.forest_kills++; if (G.stats.forest_kills >= 10) unlock('forest_walker'); }
+  checkLevelUp();
+  if (b.boss) {
+    unlock('dragonslayer');
+    if (b.potionsUsed === 0) unlock('no_potion');
+    G.scene = 'victory';
+    Audio.victory(); Audio.stopMusic();
+    flash('#ffd700', 30);
+    return;
+  }
+  G.battle = null;
+  G.scene = G.prevScene || 'world';
+  if (G.scene === 'forest' || G.scene === 'castle') populateEnemies();
+  Audio.startMusic(G.scene === 'castle' ? 'castle' : 'forest');
+}
+function populateEnemies() {
+  G.enemies = [];
+  const loc = G.scene === 'forest' ? 'forest' : (G.scene === 'castle' ? 'castle' : 'lair');
+  const names = Object.keys(ENEMIES).filter(n => ENEMIES[n].loc === loc && !ENEMIES[n].boss);
+  const count = 3;
+  for (let i = 0; i < count; i++) {
+    const name = names[Math.floor(Math.random() * names.length)];
+    G.enemies.push({
+      name, x: 100 + i * 110, y: H - 100,
+      sprite: ENEMIES[name].sprite, pal: ENEMIES[name].pal,
+      size: ENEMIES[name].size, bob: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+/* ==================== ОТРИСОВКА ==================== */
+function drawMenu() {
+  drawForestBG(G.t);
+  CTX.fillStyle = '#000';
+  CTX.fillRect(40, 25, W-80, 50);
+  CTX.strokeStyle = '#ffd700';
+  CTX.lineWidth = 2;
+  CTX.strokeRect(40, 25, W-80, 50);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 20px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  CTX.fillText('⚔️ РЫЦАРЬ vs ДРАКОН 🐉', W/2, 50);
+
+  drawSprite(SPR_KNIGHT, 50, H-90, 4, false, PAL_KNIGHT);
+  drawSprite(SPR_DRAGON, W-130, H-120, 4, true, PAL_DRAGON);
+
+  const cx = W/2 - 90;
+  btn(cx, 90, 180, 28, '⚔️ НОВАЯ ИГРА', () => { G.scene = 'class'; Audio.beep(660,0.1); }, '#3a6a3a');
+  if (hasSave()) {
+    btn(cx, 125, 180, 28, '💾 ЗАГРУЗИТЬ', () => {
+      if (loadGame()) { G.scene = 'world'; Audio.beep(660,0.1); showToast('✅ Загружено', '#88ff88'); }
+      else showToast('❌ Нет сохранения', '#ff6666');
+    }, '#3a3a6a');
+  }
+  btn(cx, 160, 180, 28, '🏆 ДОСТИЖЕНИЯ', () => { G.prevScene='menu'; G.scene='achievements'; }, '#6a3a6a');
+  btn(cx, 195, 180, 28, Audio.musicOn ? '🔊 МУЗЫКА: ВКЛ' : '🔇 МУЗЫКА: ВЫКЛ', () => {
+    Audio.toggleMusic();
+  }, '#3a3a3a');
+}
+
+function drawClassSelect() {
+  CTX.fillStyle = '#0a0a1a';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 16px Courier New';
+  CTX.textAlign = 'center';
+  CTX.fillText('ВЫБЕРИ КЛАСС', W/2, 22);
+
+  const keys = Object.keys(CLASSES);
+  const cw = 140, gap = 10;
+  const totalW = keys.length * cw + (keys.length-1) * gap;
+  const startX = (W - totalW) / 2;
+
+  keys.forEach((k, i) => {
+    const c = CLASSES[k];
+    const x = startX + i * (cw + gap);
+    const y = 35;
+    CTX.fillStyle = '#1a1a2e';
+    CTX.fillRect(x, y, cw, 180);
+    CTX.strokeStyle = c.color;
+    CTX.lineWidth = 2;
+    CTX.strokeRect(x, y, cw, 180);
+    drawSprite(SPR_KNIGHT, x + cw/2 - 24, y + 15, 4, false, { '1':c.color,'2':'#e8e8f0','3':'#1a1a2e','5':'#c03a3a','7':'#5a78b8' });
+    CTX.fillStyle = c.color;
+    CTX.font = 'bold 14px Courier New';
+    CTX.textAlign = 'center';
+    CTX.fillText(c.name, x + cw/2, y + 85);
+    CTX.fillStyle = '#ffffff';
+    CTX.font = '11px Courier New';
+    CTX.fillText('HP: ' + c.hp, x + cw/2, y + 105);
+    CTX.fillText('ATK: ' + (c.atk >= 0 ? '+' : '') + c.atk, x + cw/2, y + 120);
+    CTX.fillText('DEF: ' + c.def, x + cw/2, y + 135);
+    btn(x + 15, y + 150, cw - 30, 22, 'ВЫБРАТЬ', () => {
+      createPlayer(k, 'Рыцарь');
+      G.scene = 'world';
+      Audio.startMusic('forest');
+      showToast('⚔️ В путь, ' + c.name + '!', c.color);
+    }, c.color, '#000');
+  });
+
+  btn(10, H - 30, 70, 22, '← НАЗАД', () => { G.scene = 'menu'; }, '#3a3a3a');
+}
+
+function drawWorld() {
+  drawForestBG(G.t);
+  CTX.fillStyle = '#000';
+  CTX.fillRect(0, 0, W, 28);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 14px Courier New';
+  CTX.textAlign = 'center';
+  CTX.fillText('🗺️ КАРТА МИРА', W/2, 18);
+
+  // Лес
+  CTX.fillStyle = '#1a3a1a';
+  CTX.fillRect(30, 50, 120, 150);
+  CTX.strokeStyle = '#33aa33';
+  CTX.lineWidth = 2;
+  CTX.strokeRect(30, 50, 120, 150);
+  CTX.fillStyle = '#33aa33';
+  CTX.font = 'bold 16px Courier New';
+  CTX.textAlign = 'center';
+  CTX.fillText('🌲 ЛЕС', 90, 80);
+  for (let i = 0; i < 3; i++) {
+    CTX.fillStyle = '#1a1a12';
+    CTX.fillRect(50 + i*30, 140, 4, 25);
+    CTX.fillStyle = '#2a5a2a';
+    CTX.fillRect(40 + i*30, 120, 24, 22);
+  }
+  btn(40, 175, 100, 20, 'ВОЙТИ', () => { G.scene = 'forest'; populateEnemies(); Audio.startMusic('forest'); }, '#1a5a1a');
+
+  // Замок
+  CTX.fillStyle = '#2a2a4a';
+  CTX.fillRect(180, 50, 120, 150);
+  CTX.strokeStyle = '#8888cc';
+  CTX.strokeRect(180, 50, 120, 150);
+  CTX.fillStyle = '#8888cc';
+  CTX.font = 'bold 16px Courier New';
+  CTX.fillText('🏰 ЗАМОК', 240, 80);
+  drawCastle(210, 110, 2);
+  btn(190, 175, 100, 20, 'ВОЙТИ', () => {
+    G.stats.castle_visited = true; unlock('castle_visit');
+    G.scene = 'castle'; populateEnemies(); Audio.startMusic('castle');
+  }, '#3a3a6a');
+
+  // Логово
+  CTX.fillStyle = '#3a1a0a';
+  CTX.fillRect(330, 50, 120, 150);
+  CTX.strokeStyle = '#ff4400';
+  CTX.strokeRect(330, 50, 120, 150);
+  CTX.fillStyle = '#ff4400';
+  CTX.font = 'bold 16px Courier New';
+  CTX.fillText('🐉 ЛОГОВО', 390, 80);
+  drawSprite(SPR_DRAGON, 360, 110, 3, false, PAL_DRAGON);
+  btn(340, 175, 100, 20, 'ВОЙТИ', () => {
+    if (G.player.level < 3) { showToast('⚠️ Нужен 3 уровень!', '#ff6666'); return; }
+    G.scene = 'lair';
+    startBattle('Дракон');
+  }, '#6a1a0a');
+
+  btn(W - 85, H - 30, 75, 22, '👤 ПРОФИЛЬ', () => { G.scene = 'profile'; }, '#3a3a5a');
+  btn(W - 170, H - 30, 75, 22, '🏆 НАГРАДЫ', () => { G.prevScene='world'; G.scene='achievements'; }, '#6a3a6a');
+  drawHUD();
+}
+
+function drawLocation() {
+  if (G.scene === 'forest') drawForestBG(G.t);
+  else drawCastleBG(G.t);
+
+  for (const e of G.enemies) {
+    const bob = Math.sin(G.t * 0.005 + e.bob) * 2;
+    drawSprite(e.sprite, e.x, e.y + bob, e.size, false, e.pal);
+    CTX.fillStyle = '#ff6666';
+    CTX.font = 'bold 10px Courier New';
+    CTX.textAlign = 'center';
+    CTX.fillText(e.name, e.x + 6 * e.size, e.y - 5);
+    btn(e.x - 15, e.y - 28, 60, 20, '⚔️ БОЙ', () => {
+      G.prevScene = G.scene;
+      startBattle(e.name);
+    }, '#6a1a1a');
+  }
+
+  const bob = Math.sin(G.t * 0.005) * 1;
+  drawSprite(SPR_KNIGHT, W/2 - 18, H - 85 + bob, 3, false, { '1': G.player ? CLASSES[G.player.classKey].color : '#8fa4c4', '2':'#e8e8f0','3':'#1a1a2e','5':'#c03a3a','7':'#5a78b8' });
+
+  CTX.fillStyle = '#000';
+  CTX.fillRect(0, 0, W, 28);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 12px Courier New';
+  CTX.textAlign = 'left';
+  CTX.fillText('🗺️ ' + (G.scene === 'forest' ? 'ТЁМНЫЙ ЛЕС' : '🏰 ЗАМОК'), 10, 18);
+
+  btn(W - 130, 4, 60, 20, '💾', saveGame, '#3a3a3a');
+  btn(W - 65, 4, 60, 20, '← НАЗАД', () => { G.scene = 'world'; }, '#3a3a3a');
+
+  if (G.scene === 'castle') {
+    btn(10, 35, 110, 22, '🛒 МАГАЗИН', () => { G.scene = 'shop'; }, '#6a5a1a');
+    btn(10, 62, 130, 22, '🧪 ЗЕЛЬЕ (30💰)', () => {
+      if (G.player.gold >= 30) { G.player.gold -= 30; G.player.potions++; Audio.potion(); showToast('🧪 +1 зелье', '#88ff88'); }
+      else showToast('❌ Мало золота', '#ff6666');
+    }, '#1a5a3a');
+  }
+  drawHUD();
+}
+
+function drawBattle() {
+  const b = G.battle;
+  if (b.boss) drawLairBG(G.t);
+  else if (G.prevScene === 'castle') drawCastleBG(G.t);
+  else drawForestBG(G.t);
+
+  CTX.save();
+  if (b.enemyShake > 0) { CTX.translate((Math.random()-0.5)*b.enemyShake, 0); b.enemyShake *= 0.8; }
+  const enemyBob = Math.sin(G.t * 0.008) * 3;
+  const ex = W/2 + 50, ey = H/2 - 50 + enemyBob;
+  if (b.enemyFlash > 0) {
+    CTX.globalAlpha = b.enemyFlash / 8;
+    CTX.fillStyle = '#ffffff';
+    CTX.fillRect(ex - 2, ey - 2, 16 * b.size + 4, 16 * b.size + 4);
+    CTX.globalAlpha = 1;
+    b.enemyFlash--;
+  }
+  drawSprite(b.sprite, ex, ey, b.size, true, b.pal);
+  CTX.restore();
+
+  drawBar(W - 200, 35, 190, 14, b.hp, b.maxHp, '#cc2222', b.name);
+
+  CTX.save();
+  if (b.playerShake > 0) { CTX.translate((Math.random()-0.5)*b.playerShake, 0); b.playerShake *= 0.8; }
+  const playerBob = Math.sin(G.t * 0.01) * 2;
+  const px = W/2 - 110, py = H/2 - 50 + playerBob;
+  if (b.playerFlash > 0) {
+    CTX.globalAlpha = b.playerFlash / 8;
+    CTX.fillStyle = '#ff0000';
+    CTX.fillRect(px - 2, py - 2, 12 * 3 + 4, 12 * 3 + 4);
+    CTX.globalAlpha = 1;
+    b.playerFlash--;
+  }
+  drawSprite(SPR_KNIGHT, px, py, 3, false, { '1': CLASSES[G.player.classKey].color, '2':'#e8e8f0','3':'#1a1a2e','5':'#c03a3a','7':'#5a78b8' });
+
+  if (b.playerAttackAnim > 0) {
+    CTX.fillStyle = WEAPONS[G.player.weapon].color;
+    const ax = px + 36 + (15 - b.playerAttackAnim) * 3;
+    CTX.fillRect(ax, py + 20, 20, 4);
+    CTX.fillRect(ax + 16, py + 16, 4, 12);
+    b.playerAttackAnim--;
+  }
+  if (b.enemyAttackAnim > 0) {
+    CTX.fillStyle = '#ff4400';
+    const ax = ex - (15 - b.enemyAttackAnim) * 3;
+    CTX.fillRect(ax - 10, ey + 20, 16, 4);
+    b.enemyAttackAnim--;
+  }
+  CTX.restore();
+
+  drawBar(10, 35, 190, 14, G.player.hp, G.player.maxHp, '#22cc22', G.player.name + ' Ур.' + G.player.level);
+
+  CTX.fillStyle = 'rgba(0,0,0,0.6)';
+  CTX.fillRect(10, H - 65, 200, 55);
+  CTX.font = '11px Courier New';
+  CTX.textAlign = 'left';
+  b.log = b.log.filter(l => { l.life--; return l.life > 0; });
+  b.log.slice(-4).forEach((l, i) => {
+    CTX.fillStyle = l.color;
+    CTX.fillText(l.text, 15, H - 50 + i * 12);
+  });
+
+  if (b.turn === 0 && b.hp > 0) {
+    btn(W/2 - 130, H - 32, 80, 28, '⚔️ АТАКА', playerAttack, '#6a1a1a');
+    btn(W/2 - 45, H - 32, 80, 28, '🧪 ЗЕЛЬЕ(' + G.player.potions + ')', usePotion, '#1a5a3a');
+    btn(W/2 + 40, H - 32, 80, 28, '🏃 БЕЖАТЬ', () => {
+      if (b.boss) { showToast('❌ От дракона не убежать!', '#ff6666'); return; }
+      if (Math.random() < 0.5) {
+        showToast('🏃 Сбежал!', '#ffd700');
+        G.battle = null;
+        G.scene = G.prevScene;
+        if (G.scene === 'forest' || G.scene === 'castle') populateEnemies();
+        Audio.startMusic(G.scene === 'castle' ? 'castle' : 'forest');
+      } else {
+        showToast('❌ Побег не удался!', '#ff6666');
+        b.turn = 1;
+        setTimeout(enemyAttack, 400);
+      }
+    }, '#3a3a5a');
+  } else if (b.turn === 1) {
+    CTX.fillStyle = '#ffd700';
+    CTX.font = 'bold 14px Courier New';
+    CTX.textAlign = 'center';
+    CTX.fillText('...', W/2, H - 20);
+  }
+
+  CTX.fillStyle = 'rgba(0,0,0,0.7)';
+  CTX.fillRect(W - 140, H - 30, 130, 20);
+  CTX.fillStyle = WEAPONS[G.player.weapon].color;
+  CTX.font = 'bold 11px Courier New';
+  CTX.textAlign = 'left';
+  CTX.fillText('🗡️ ' + G.player.weapon, W - 135, H - 16);
+}
+
+function drawBar(x, y, w, h, val, max, color, label) {
+  CTX.fillStyle = '#000';
+  CTX.fillRect(x - 2, y - 2, w + 4, h + 4);
+  CTX.fillStyle = '#333';
+  CTX.fillRect(x, y, w, h);
+  const pct = Math.max(0, val / max);
+  CTX.fillStyle = color;
+  CTX.fillRect(x, y, w * pct, h);
+  CTX.fillStyle = 'rgba(255,255,255,0.3)';
+  CTX.fillRect(x, y, w * pct, h/3);
+  CTX.fillStyle = '#fff';
+  CTX.font = 'bold 10px Courier New';
+  CTX.textAlign = 'left';
+  CTX.textBaseline = 'middle';
+  CTX.fillText(label + ' ' + Math.max(0, Math.floor(val)) + '/' + max, x + 4, y + h/2);
+}
+
+function drawShop() {
+  drawCastleBG(G.t);
+  CTX.fillStyle = 'rgba(0,0,0,0.8)';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 16px Courier New';
+  CTX.textAlign = 'center';
+  CTX.fillText('🛒 МАГАЗИН ОРУЖИЯ', W/2, 22);
+  CTX.font = '12px Courier New';
+  CTX.fillText('💰 Золото: ' + G.player.gold, W/2, 42);
+
+  const items = Object.entries(WEAPONS);
+  items.forEach(([name, w], i) => {
+    const y = 55 + i * 30;
+    const owned = G.weaponsOwned.has(name);
+    CTX.fillStyle = owned ? '#2a4a2a' : '#2a2a3a';
+    CTX.fillRect(30, y, W - 60, 26);
+    CTX.strokeStyle = w.color;
+    CTX.lineWidth = 1;
+    CTX.strokeRect(30, y, W - 60, 26);
+    CTX.fillStyle = w.color;
+    CTX.font = 'bold 11px Courier New';
+    CTX.textAlign = 'left';
+    CTX.textBaseline = 'middle';
+    CTX.fillText((owned ? '✔️ ' : '') + name, 38, y + 13);
+    CTX.fillStyle = '#fff';
+    CTX.font = '10px Courier New';
+    CTX.fillText('Урон ' + w.dmg[0] + '-' + w.dmg[1] + ' Крит ' + Math.floor(w.crit*100) + '%', 200, y + 13);
+    CTX.fillStyle = '#ffd700';
+    CTX.fillText(w.price + '💰', 355, y + 13);
+    btn(410, y + 3, 55, 20, owned ? 'ВЗЯТЬ' : 'КУПИТЬ', () => {
+      if (owned) { G.player.weapon = name; showToast('🗡️ ' + name, '#88ff88'); return; }
+      if (G.player.gold >= w.price) {
+        G.player.gold -= w.price;
+        G.player.weapon = name;
+        G.weaponsOwned.add(name);
+        Audio.coin();
+        showToast('✅ ' + name, '#88ff88');
+        if (name === 'Стальной меч') unlock('armored');
+        if (name === 'Боевой топор') unlock('berserker');
+        if (name === 'Пламенный клинок') unlock('flame_master');
+        if (G.weaponsOwned.size >= 3) unlock('collector');
+        if (G.player.gold >= 1000) unlock('rich');
+      } else showToast('❌ Мало золота', '#ff6666');
+    }, owned ? '#2a4a2a' : '#6a5a1a', '#fff');
+  });
+
+  btn(10, H - 30, 70, 22, '← НАЗАД', () => { G.scene = 'castle'; }, '#3a3a3a');
+}
+
+function drawProfile() {
+  CTX.fillStyle = '#0a0a1a';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 16px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  CTX.fillText('👤 ПРОФИЛЬ', W/2, 22);
+
+  drawSprite(SPR_KNIGHT, 50, 50, 4, false, { '1': CLASSES[G.player.classKey].color, '2':'#e8e8f0','3':'#1a1a2e','5':'#c03a3a','7':'#5a78b8' });
+
+  CTX.textAlign = 'left';
+  CTX.font = '12px Courier New';
+  CTX.fillStyle = '#fff';
+  const p = G.player;
+  const lines = [
+    'Имя: ' + p.name,
+    'Класс: ' + p.class,
+    'Уровень: ' + p.level + ' (' + p.exp + '/' + p.expNext + ')',
+    'HP: ' + p.hp + '/' + p.maxHp,
+    'Атака: +' + p.atk + '  Защита: ' + p.def,
+    '💰 Золото: ' + p.gold,
+    '🧪 Зелий: ' + p.potions,
+    '🗡️ Оружие: ' + p.weapon,
+  ];
+  lines.forEach((l, i) => CTX.fillText(l, 140, 65 + i * 18));
+
+  btn(10, H - 30, 70, 22, '← НАЗАД', () => { G.scene = 'world'; }, '#3a3a3a');
+}
+
+function drawAchievements() {
+  CTX.fillStyle = '#0a0a1a';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 16px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  CTX.fillText('🏆 ДОСТИЖЕНИЯ', W/2, 22);
+
+  const keys = Object.keys(ACHIEVEMENTS);
+  CTX.font = '10px Courier New';
+  keys.forEach((k, i) => {
+    const unlocked = G.achievements[k];
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const x = 15 + col * 230;
+    const y = 42 + row * 20;
+    CTX.fillStyle = unlocked ? '#2a4a2a' : '#1a1a2a';
+    CTX.fillRect(x, y, 225, 18);
+    CTX.strokeStyle = unlocked ? '#88ff88' : '#444';
+    CTX.lineWidth = 1;
+    CTX.strokeRect(x, y, 225, 18);
+    CTX.fillStyle = unlocked ? '#88ff88' : '#666';
+    CTX.textAlign = 'left';
+    CTX.fillText((unlocked ? '✔️ ' : '🔒 ') + ACHIEVEMENTS[k], x + 6, y + 12);
+  });
+
+  const total = Object.keys(ACHIEVEMENTS).length;
+  const done = Object.values(G.achievements).filter(v => v).length;
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 12px Courier New';
+  CTX.textAlign = 'center';
+  CTX.fillText('Открыто: ' + done + '/' + total, W/2, H - 30);
+
+  btn(10, H - 25, 70, 22, '← НАЗАД', () => { G.scene = G.prevScene || 'menu'; }, '#3a3a3a');
+}
+
+function drawGameOver() {
+  CTX.fillStyle = '#0a0000';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#ff2222';
+  CTX.font = 'bold 28px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  CTX.fillText('💀 ТЫ ПОГИБ', W/2, H/2 - 30);
+  CTX.font = '14px Courier New';
+  CTX.fillStyle = '#fff';
+  CTX.fillText('Рыцарь пал в бою...', W/2, H/2 + 5);
+  btn(W/2 - 90, H/2 + 40, 80, 28, '🔄 ЗАНОВО', () => {
+    G.player.hp = G.player.maxHp;
+    G.scene = 'world';
+    Audio.startMusic('forest');
+  }, '#3a6a3a');
+  btn(W/2 + 10, H/2 + 40, 80, 28, '🏠 МЕНЮ', () => { G.scene = 'menu'; Audio.stopMusic(); Audio.startMusic('menu'); }, '#3a3a5a');
+}
+
+function drawVictory() {
+  drawLairBG(G.t);
+  CTX.fillStyle = 'rgba(0,0,0,0.75)';
+  CTX.fillRect(0, 0, W, H);
+  CTX.fillStyle = '#ffd700';
+  CTX.font = 'bold 24px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  CTX.fillText('🏆 ПОБЕДА! 🏆', W/2, H/2 - 50);
+  CTX.font = 'bold 15px Courier New';
+  CTX.fillStyle = '#fff';
+  CTX.fillText('Дракон повержен!', W/2, H/2 - 18);
+  CTX.font = '12px Courier New';
+  CTX.fillText('Ты вошёл в легенды, ' + G.player.name + '!', W/2, H/2 + 5);
+  CTX.fillText('Уровень: ' + G.player.level + '  |  Золото: ' + G.player.gold, W/2, H/2 + 25);
+
+  if (G.frame % 8 === 0) {
+    spawnParticles(Math.random() * W, Math.random() * H/2, ['#ffd700','#ff4444','#44ff44','#4444ff'][Math.floor(Math.random()*4)], 12, 3);
+  }
+
+  btn(W/2 - 90, H/2 + 55, 80, 28, '🏠 МЕНЮ', () => { G.scene = 'menu'; Audio.stopMusic(); Audio.startMusic('menu'); }, '#3a3a5a');
+  btn(W/2 + 10, H/2 + 55, 80, 28, '🏆 НАГРАДЫ', () => { G.prevScene = 'victory'; G.scene = 'achievements'; }, '#6a5a1a');
+}
+
+function drawHUD() {
+  if (!G.player) return;
+  CTX.fillStyle = 'rgba(0,0,0,0.75)';
+  CTX.fillRect(0, H - 20, W, 20);
+  CTX.font = 'bold 10px Courier New';
+  CTX.textAlign = 'left';
+  CTX.textBaseline = 'middle';
+  CTX.fillStyle = '#88ff88';
+  CTX.fillText('❤️ ' + G.player.hp + '/' + G.player.maxHp, 8, H - 10);
+  CTX.fillStyle = '#ffd700';
+  CTX.fillText('💰 ' + G.player.gold, 110, H - 10);
+  CTX.fillStyle = '#88aaff';
+  CTX.fillText('⭐ Ур.' + G.player.level, 195, H - 10);
+  CTX.fillStyle = '#ff88ff';
+  CTX.fillText('🧪 ' + G.player.potions, 270, H - 10);
+  CTX.fillStyle = '#fff';
+  CTX.fillText('🗡️ ' + G.player.weapon, 340, H - 10);
+}
+
+function drawToast() {
+  if (!G.toast || G.toastTimer <= 0) return;
+  const alpha = Math.min(1, G.toastTimer / 30);
+  CTX.globalAlpha = alpha;
+  CTX.fillStyle = 'rgba(0,0,0,0.9)';
+  const text = G.toast.text;
+  CTX.font = 'bold 13px Courier New';
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+  const tw = CTX.measureText(text).width + 30;
+  const x = W/2 - tw/2;
+  const y = 50;
+  CTX.fillRect(x, y, tw, 24);
+  CTX.strokeStyle = G.toast.color;
+  CTX.lineWidth = 2;
+  CTX.strokeRect(x, y, tw, 24);
+  CTX.fillStyle = G.toast.color;
+  CTX.fillText(text, W/2, y + 12);
+  CTX.globalAlpha = 1;
+  G.toastTimer--;
+}
+
+/* ==================== ГЛАВНЫЙ ЦИКЛ ==================== */
+function loop() {
+  G.t++;
+  G.frame++;
+
+  CTX.setTransform(1, 0, 0, 1, 0, 0);
+  CTX.fillStyle = '#000';
+  CTX.fillRect(0, 0, W, H);
+
+  CTX.save();
+  applyShake();
+
+  buttons = [];
+
+  switch (G.scene) {
+    case 'menu': drawMenu(); break;
+    case 'class': drawClassSelect(); break;
+    case 'world': drawWorld(); break;
+    case 'forest':
+    case 'castle': drawLocation(); break;
+    case 'battle': drawBattle(); break;
+    case 'shop': drawShop(); break;
+    case 'profile': drawProfile(); break;
+    case 'achievements': drawAchievements(); break;
+    case 'gameover': drawGameOver(); break;
+    case 'victory': drawVictory(); break;
+  }
+
+  updateParticles();
+  drawParticles();
+  drawToast();
+  drawFlash();
+
+  for (const b of buttons) drawButton(b);
+
+  CTX.restore();
+
+  btnPressX = -1; btnPressY = -1;
+
+  requestAnimationFrame(loop);
+}
+
+/* ==================== СТАРТ ==================== */
+window.addEventListener('load', () => { resize(); });
+setTimeout(resize, 100);
+setTimeout(resize, 500);
+
+Audio.init();
+loop();
+</script>
+</body>
+</html>
